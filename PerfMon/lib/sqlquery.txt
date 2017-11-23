@@ -1,0 +1,60 @@
+﻿
+declare @reportid int,@ccid int,@TestStartTime datetime,@LastCCID int ,@systemundertestid int;
+select @TestStartTime=Starttime from loadtestrun where loadtestrunid=@loadtestrunid
+set @ccid=0;
+select @reportid =  max(reportid) from LoadTestReportRuns where LoadTestRunId=@loadtestrunid;
+if (@reportid is null)
+set @reportid =  1;
+else 
+select @reportid =  max(reportid)+1 from LoadTestReportRuns
+
+select @LastCCID = max(countercategoryid) from LoadTestPerformanceCounterCategory where loadtestrunid=@loadtestrunid
+select @systemundertestid = max(systemundertestid) from LoadTestSystemUnderTest where loadtestrunid=@loadtestrunid
+
+if (@systemundertestid is null)
+set @systemundertestid =  0;
+else 
+select @systemundertestid =  max(systemundertestid) from LoadTestSystemUnderTest where loadtestrunid=@loadtestrunid
+
+insert into LoadTestReportRuns values(@reportid,@loadtestrunid); 
+insert into LoadTestReportPage select distinct @reportid , CounterCategory,CounterName from PerfCountersTemp where runid=@loadtestrunid  --1 record
+insert into LoadTestSystemUnderTest select distinct @loadtestrunid,@systemundertestid+ROW_NUMBER()over( order by MachineName) as SystemUnderTestId,MachineName from PerfCountersTemp  where runid=@loadtestrunid   group by MachineName --20 record
+insert into LoadTestRunInterval  select  @loadtestrunid,(select max(testrunintervalid) from loadtestruninterval where loadtestrunid =@loadtestrunid )+ ROW_NUMBER() over( order by CounterCollectionTime  ) ,convert(datetime, CounterCollectionTime, 0),convert(datetime, CounterCollectionTime+dateadd(second,60,0), 0) from (select distinct CounterCollectionTime from PerfCountersTemp p1  where runid=@loadtestrunid  ) t 
+insert into LoadTestPerformanceCounterCategory select distinct @loadtestrunid as LoadTestRunid,@LastCCID+ROW_NUMBER()over( order by CounterCategory,MachineName) as CounterCategoryID,CounterCategory as CategoryName,MachineName as MachineName,datediff(second,'19700101',min(CounterCollectionTime) ) as StartTimeStamp100nSec from PerfCountersTemp  where runid=@loadtestrunid group by CounterCategory,MachineName
+
+insert into [LoadTestPerformanceCounter] 
+select @loadtestrunid,
+t.countercategoryid,
+(select max(counterid) from [LoadTestPerformanceCounter] where LoadTestRunId=@loadtestrunid)
++ROW_NUMBER()over( order by t.MachineName) as Counterid,
+t.CounterName,0
+from (select distinct pc.CounterCategoryID ,
+CounterName,p1.MachineName from PerfCountersTemp p1 inner join LoadTestPerformanceCounterCategory pc on
+p1.CounterCategory=pc.categoryname and p1.MachineName=pc.machinename and loadtestrunid=@loadtestrunid  where p1.runid=@loadtestrunid  )t 
+
+insert into LoadTestPerformanceCounterInstance 
+   select @loadtestrunid,pc.CounterId, (select max(instanceid) from  LoadTestPerformanceCounterInstance where loadtestrunid=@loadtestrunid)+
+  ROW_NUMBER() over( order by p1.CounterInstance ) instanceid,NULL loadtestitemid ,
+p1.CounterInstance Instancename,p1.countervalue cumulativevalue,0 overallthresholdruleresult
+  from (
+select distinct p1.CounterInstance,p1.CounterName,p1.MachineName,min(p1.countervalue) as countervalue,CounterCategory from PerfCountersTemp p1 
+ where p1.runid=@loadtestrunid  and p1.CounterInstance is not null and p1.CounterInstance !='' group by CounterInstance,CounterName,MachineName,CounterCategory) p1 inner join 
+  LoadTestPerformanceCounter pc on p1.CounterName=pc.CounterName and pc.LoadTestRunId=@loadtestrunid 
+ inner   join  LoadTestPerformanceCounterCategory cc on pc.CounterCategoryId=cc.CounterCategoryId 
+ and p1.MachineName=cc.MachineName and p1.CounterCategory=cc.CategoryName
+
+insert into LoadTestPerformanceCounterSample 
+ select @loadtestrunid,iid.TestRunIntervalid TestRunIntervalid,
+pci.instanceid,
+cast(p1.countervalue as bigint) as computedValue,
+cast(p1.countervalue as bigint) as RawValue,
+0 as [BaseValue],
+0 as counterFrequncy, 10000000 as SystemFrequency,
+datediff_big(s, '19700101',CounterCollectionTime) as SampleTimeStamp,
+datediff_big(s, '19700101',CounterCollectionTime) as SampleTimeStamp100nSec,
+65792 as CounterType, 0 as ThresholdRuleResult , NULL as ThresholdRuleMessageId from PerfCountersTemp p1
+inner join LoadTestPerformanceCounterCategory pcc on p1.MachineName=pcc.MachineName and p1.CounterCategory=pcc.CategoryName  and pcc.LoadTestRunId=@loadtestrunid
+inner join LoadTestPerformanceCounter pc on p1.CounterName=pc.CounterName and pcc.countercategoryid=pc.countercategoryid and pc.LoadTestRunId=@loadtestrunid
+inner join LoadTestPerformanceCounterInstance pci on pc.counterid=pci.counterid and p1.CounterInstance=pci.InstanceName and pci.LoadTestRunId=@loadtestrunid
+inner join LoadTestRunInterval iid on convert(datetime, p1.CounterCollectionTime,0 )=iid.intervalstarttime and iid.LoadTestRunId=@loadtestrunid
+where p1.runid=@loadtestrunid 
